@@ -16,6 +16,7 @@ from astrbot.api.message_components import (
     File,
     Image,
     Plain,
+    Record,
     Reply,
 )
 from astrbot.api.platform import AstrBotMessage, At, PlatformMetadata
@@ -248,6 +249,57 @@ class DiscordPlatformEvent(AstrMessageEvent):
                         logger.warning(f"[Discord] 获取文件失败: {i.name}")
                 except Exception as e:
                     logger.warning(f"[Discord] 处理文件失败: {i.name}, 错误: {e}")
+            elif isinstance(i, Record):
+                # 处理语音/音频文件（TTS 插件生成的语音）
+                logger.debug(f"[Discord] 开始处理 Record 组件: {i}")
+                try:
+                    # TTS 插件返回的是规范化的绝对路径字符串
+                    file_path_str = i.file
+                    if not file_path_str:
+                        logger.warning("[Discord] Record 组件缺少 file 属性")
+                        continue
+
+                    # 处理 file:/// URI（兼容其他平台）
+                    if file_path_str.startswith("file:///"):
+                        file_path_str = file_path_str[8:]
+
+                    path = Path(file_path_str)
+
+                    # 直接读取文件，避免 TOCTOU 竞态条件
+                    try:
+                        file_bytes = await asyncio.to_thread(path.read_bytes)
+                    except FileNotFoundError:
+                        logger.warning(f"[Discord] 语音文件不存在: {path}")
+                        continue
+
+                    filename = path.name
+                    file_size_mb = len(file_bytes) / (1024 * 1024)
+
+                    # 检查文件大小（Discord 限制：普通用户 25MB，Nitro 500MB）
+                    if file_size_mb > 25:
+                        logger.warning(
+                            f"[Discord] 语音文件较大: {filename} ({file_size_mb:.2f}MB), "
+                            "可能超过 Discord 限制（普通用户 25MB）"
+                        )
+
+                    logger.debug(
+                        f"[Discord] 发送语音文件: {filename} "
+                        f"({file_size_mb:.2f}MB, {path.suffix})"
+                    )
+
+                    files.append(
+                        discord.File(BytesIO(file_bytes), filename=filename),
+                    )
+
+                    # 可选：显示 TTS 源文本（当前 TTS 插件不使用此功能）
+                    if i.text and i.text.strip():
+                        content_parts.append(f"\n🎵 {i.text}")
+
+                except Exception as e:
+                    logger.error(
+                        f"[Discord] 处理语音文件失败: {getattr(i, 'file', '未知')}, 错误: {e}",
+                        exc_info=True,
+                    )
             elif isinstance(i, DiscordEmbed):
                 # Discord Embed消息
                 embeds.append(i.to_discord_embed())
